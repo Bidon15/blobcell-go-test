@@ -1,0 +1,9 @@
+[celestia]
+# Get your private key from Keplr: Settings > Show Private Key
+# You can provide either a private_key OR a mnemonic
+private_key = "your_hex_private_key_here"
+# mnemonic = "your twelve or twenty four word mnemonic phrase here"
+network = "mocha-4"
+rpc_url = "http://localhost:26658"
+grpc_url = "http://localhost:9090"
+namespace = "test/blobcell"
