@@ -10,6 +10,7 @@ import (
 	"github.com/celestiaorg/celestia-node/api/client"
 	"github.com/celestiaorg/celestia-node/blob"
 	"github.com/celestiaorg/celestia-node/nodebuilder/p2p"
+	"github.com/celestiaorg/celestia-node/state"
 	libshare "github.com/celestiaorg/go-square/v3/share"
 	"github.com/cosmos/cosmos-sdk/codec"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
@@ -46,41 +47,12 @@ func main() {
 		panic("celestia.namespace is required in config.toml")
 	}
 
-	// Setup in-memory keyring with minimal codec
+	// Setup in-memory keyring
 	keyname := "blobcell"
-
-	// Create minimal codec for keyring
-	interfaceRegistry := codectypes.NewInterfaceRegistry()
-	cdc := codec.NewProtoCodec(interfaceRegistry)
-	kr := keyring.NewInMemory(cdc)
-
-	if privateKeyHex != "" {
-		// Decode hex private key
-		privateKeyBytes, err := hex.DecodeString(privateKeyHex)
-		if err != nil {
-			panic(fmt.Sprintf("Failed to decode private key hex: %v", err))
-		}
-
-		// Import as armor format (which is what Keplr exports)
-		err = kr.ImportPrivKey(keyname, string(privateKeyBytes), "")
-		if err != nil {
-			panic(fmt.Sprintf("Failed to import private key: %v", err))
-		}
-	} else {
-		// Use mnemonic
-		// Default HD path for Cosmos/Celestia: m/44'/118'/0'/0/0
-		hdPath := "m/44'/118'/0'/0/0"
-		// Use secp256k1
-		algo := hd.Secp256k1
-
-		_, err := kr.NewAccount(keyname, mnemonic, "", hdPath, algo)
-		if err != nil {
-			panic(fmt.Sprintf("Failed to create account from mnemonic: %v", err))
-		}
+	kr, err := setupInMemoryKeyring(keyname, privateKeyHex, mnemonic)
+	if err != nil {
+		panic(err)
 	}
-
-	// Register crypto types
-	cryptocodec.RegisterInterfaces(interfaceRegistry)
 
 	// Configure client using config values
 	cfg := client.Config{
@@ -123,11 +95,61 @@ func main() {
 		namespaceBytes = hash[:10]
 	}
 
-	namespace, err := libshare.NewV0Namespace(namespaceBytes)
+	namespace, err := libshare.NewNamespace(libshare.ShareVersionZero, namespaceBytes)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create namespace: %v", err))
 	}
 
+	// Get feegranter from config
+	feegranterStr := viper.GetString("celestia.feegranter")
+	var submitOpts *blob.SubmitOptions
+	if feegranterStr != "" {
+		submitOpts = state.NewTxConfig(state.WithFeeGranterAddress(feegranterStr))
+		fmt.Printf("Using feegranter: %s\\n", feegranterStr)
+	}
+
+	// Submit blobs
+	if err := submitBlobs(ctx, c, namespace, submitOpts); err != nil {
+		panic(err)
+	}
+}
+
+func setupInMemoryKeyring(keyname, privateKeyHex, mnemonic string) (keyring.Keyring, error) {
+	// Create minimal codec for keyring
+	interfaceRegistry := codectypes.NewInterfaceRegistry()
+	cryptocodec.RegisterInterfaces(interfaceRegistry)
+	cdc := codec.NewProtoCodec(interfaceRegistry)
+	kr := keyring.NewInMemory(cdc)
+
+	if privateKeyHex != "" {
+		// Decode hex private key
+		privateKeyBytes, err := hex.DecodeString(privateKeyHex)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode private key hex: %w", err)
+		}
+
+		// Import as armor format (which is what Keplr exports)
+		err = kr.ImportPrivKey(keyname, string(privateKeyBytes), "")
+		if err != nil {
+			return nil, fmt.Errorf("failed to import private key: %w", err)
+		}
+	} else {
+		// Use mnemonic
+		// Default HD path for Cosmos/Celestia: m/44'/118'/0'/0/0
+		hdPath := "m/44'/118'/0'/0/0"
+		// Use secp256k1
+		algo := hd.Secp256k1
+
+		_, err := kr.NewAccount(keyname, mnemonic, "", hdPath, algo)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create account from mnemonic: %w", err)
+		}
+	}
+
+	return kr, nil
+}
+
+func submitBlobs(ctx context.Context, c *client.Client, namespace libshare.Namespace, submitOpts *blob.SubmitOptions) error {
 	// Submit 3 blobs to demonstrate the workflow
 	fmt.Println("Submitting 3 blobs to Celestia...\\n")
 	for i := 1; i <= 3; i++ {
@@ -136,13 +158,13 @@ func main() {
 
 		b, err := blob.NewBlob(libshare.ShareVersionZero, namespace, []byte(data), nil)
 		if err != nil {
-			panic(fmt.Sprintf("Failed to create blob %d: %v", i, err))
+			return fmt.Errorf("failed to create blob %d: %w", i, err)
 		}
 
 		// Submit
-		height, err := c.Blob.Submit(ctx, []*blob.Blob{b}, nil)
+		height, err := c.Blob.Submit(ctx, []*blob.Blob{b}, submitOpts)
 		if err != nil {
-			panic(fmt.Sprintf("Failed to submit blob %d: %v", i, err))
+			return fmt.Errorf("failed to submit blob %d: %w", i, err)
 		}
 
 		fmt.Printf("✓ Blob %d submitted at height %d\\n", i, height)
@@ -163,4 +185,5 @@ func main() {
 
 	fmt.Println("\\n🎉 All 3 blobs submitted successfully!")
 	fmt.Println("View your blobs on https://mocha.celenium.io")
+	return nil
 }
