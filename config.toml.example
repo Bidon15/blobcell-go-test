@@ -8,3 +8,5 @@ rpc_url = "http://localhost:26658"
 grpc_url = "http://localhost:9090"
 namespace = "test/blobcell"
 feegranter = "celestia_address"
+# Optional: auth token for gRPC endpoint (leave empty if not needed)
+auth_token = ""

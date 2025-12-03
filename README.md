@@ -52,6 +52,9 @@ namespace = "test/blobcell"
 
 # Optional: feegranter address for sponsored transactions
 feegranter = "celestia1abc..."
+
+# Optional: auth token for gRPC endpoint (leave empty if not needed)
+auth_token = ""
 ```
 
 You can also copy from the example:
@@ -122,6 +125,7 @@ config.toml
 | `celestia.grpc_url` | Yes | gRPC endpoint URL | `"http://localhost:9090"` |
 | `celestia.namespace` | Yes | Namespace for your blobs (text or hex) | `"test/blobcell"` |
 | `celestia.feegranter` | No | Feegranter address for sponsored txs | `"celestia1abc..."` |
+| `celestia.auth_token` | No | Auth token for gRPC endpoint | `""` (leave empty) |
 
 ## Key Concepts
 

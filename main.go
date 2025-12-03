@@ -66,7 +66,7 @@ func main() {
 			CoreGRPCConfig: client.CoreGRPCConfig{
 				Addr:       viper.GetString("celestia.grpc_url"),
 				TLSEnabled: true,
-				AuthToken:  "2ae91d0d78ef0a253990449d0bb7e9f054f024c0",
+				AuthToken:  viper.GetString("celestia.auth_token"),
 			},
 		},
 	}
