@@ -1,0 +1,332 @@
+# BlobCell Example - Technical Deep Dive for LLMs
+
+This document explains what this demo does and how it works, so AI assistants and developers can understand the patterns for working with Celestia's Go client.
+
+## What This Demo Shows
+
+This is a working example of Celestia blob submission using:
+1. **In-memory keyring setup** (from private key or mnemonic)
+2. **Blob submission** (with optional feegranter support)
+3. **Blob reading/verification** (retrieving submitted data)
+
+## Architecture Overview
+
+```
+User Config (config.toml)
+    ↓
+Main Application
+    ├── setupInMemoryKeyring() → Creates ephemeral keyring
+    ├── client.New() → Creates Celestia client
+    └── submitBlobs() → Submit and verify blobs
+```
+
+## 1. In-Memory Keyring Setup
+
+### What It Does
+Creates a temporary keyring in memory without persisting anything to disk. This is useful for:
+- Testing and CI/CD
+- Temporary operations
+- Avoiding file-based keystore management
+
+### Code Pattern: Private Key Import
+
+```go
+func setupInMemoryKeyring(keyname, privateKeyHex, mnemonic string) (keyring.Keyring, error) {
+    // Create minimal codec for keyring
+    interfaceRegistry := codectypes.NewInterfaceRegistry()
+    cryptocodec.RegisterInterfaces(interfaceRegistry)
+    cdc := codec.NewProtoCodec(interfaceRegistry)
+    kr := keyring.NewInMemory(cdc)
+
+    if privateKeyHex != "" {
+        // Decode hex private key
+        privateKeyBytes, err := hex.DecodeString(privateKeyHex)
+        if err != nil {
+            return nil, fmt.Errorf("failed to decode private key hex: %w", err)
+        }
+
+        // Import as armor format (which is what Keplr exports)
+        err = kr.ImportPrivKey(keyname, string(privateKeyBytes), "")
+        if err != nil {
+            return nil, fmt.Errorf("failed to import private key: %w", err)
+        }
+    }
+    
+    return kr, nil
+}
+```
+
+**Key Points:**
+- Uses `keyring.NewInMemory()` for ephemeral storage
+- Requires Cosmos SDK codec setup (`codectypes`, `cryptocodec`)
+- Private keys from Keplr are already in the right format for `ImportPrivKey()`
+
+### Code Pattern: Mnemonic Import
+
+```go
+if mnemonic != "" {
+    // Default HD path for Cosmos/Celestia: m/44'/118'/0'/0/0
+    hdPath := "m/44'/118'/0'/0/0"
+    // Use secp256k1
+    algo := hd.Secp256k1
+
+    _, err := kr.NewAccount(keyname, mnemonic, "", hdPath, algo)
+    if err != nil {
+        return nil, fmt.Errorf("failed to create account from mnemonic: %w", err)
+    }
+}
+```
+
+**Key Points:**
+- Uses standard Cosmos HD derivation path: `m/44'/118'/0'/0/0`
+- Uses `secp256k1` curve (standard for Cosmos chains)
+- Empty passphrase ("") for in-memory keyring
+
+## 2. Celestia Client Creation
+
+### Configuration Structure
+
+```go
+cfg := client.Config{
+    ReadConfig: client.ReadConfig{
+        BridgeDAAddr: "http://localhost:26658",  // RPC endpoint
+        EnableDATLS:  true,                      // TLS for DA nodes
+    },
+    SubmitConfig: client.SubmitConfig{
+        DefaultKeyName: "blobcell",              // Key from keyring
+        Network:        p2p.Network("mocha-4"),  // Network ID
+        CoreGRPCConfig: client.CoreGRPCConfig{
+            Addr:       "http://localhost:9090", // gRPC endpoint
+            TLSEnabled: true,
+            AuthToken:  "...",                   // Optional auth token
+        },
+    },
+}
+
+c, err := client.New(ctx, cfg, kr)
+```
+
+**Key Points:**
+- `ReadConfig`: For reading blobs (RPC endpoint)
+- `SubmitConfig`: For submitting blobs (gRPC endpoint + keyring)
+- Both configs are required for full functionality
+- Client needs the keyring to sign transactions
+
+## 3. Namespace Creation
+
+### What It Does
+Creates a namespace identifier for organizing blobs. Namespaces are 29 bytes:
+- 1 byte: version (0x00 for v0)
+- 28 bytes: ID (10 bytes for v0, rest is padding)
+
+### Code Pattern
+
+```go
+import libshare "github.com/celestiaorg/go-square/v3/share"
+
+// Convert string to bytes
+namespaceBytes := []byte("test/blobcell")
+
+// If it looks like hex, try to decode it
+if len(namespaceStr)%2 == 0 {
+    if b, err := hex.DecodeString(namespaceStr); err == nil {
+        namespaceBytes = b
+    }
+}
+
+// Ensure it fits in 10 bytes (v0 namespace ID size)
+if len(namespaceBytes) > 10 {
+    // Hash to get 10 bytes
+    hash := sha256.Sum256(namespaceBytes)
+    namespaceBytes = hash[:10]
+}
+
+namespace, err := libshare.NewNamespace(libshare.ShareVersionZero, namespaceBytes)
+```
+
+**Key Points:**
+- Use `go-square/v3` (not v2) - this is important!
+- v0 namespaces are limited to 10 bytes
+- Strings longer than 10 bytes get hashed automatically
+- Supports both text and hex input
+
+## 4. Blob Submission
+
+### Basic Blob Submission
+
+```go
+func submitBlobs(ctx context.Context, c *client.Client, namespace libshare.Namespace, submitOpts *blob.SubmitOptions) error {
+    // Create blob
+    data := []byte("Hello from BlobCell!")
+    b, err := blob.NewBlob(libshare.ShareVersionZero, namespace, data, nil)
+    if err != nil {
+        return fmt.Errorf("failed to create blob: %w", err)
+    }
+
+    // Submit
+    height, err := c.Blob.Submit(ctx, []*blob.Blob{b}, submitOpts)
+    if err != nil {
+        return fmt.Errorf("failed to submit blob: %w", err)
+    }
+
+    fmt.Printf("Blob submitted at height %d\n", height)
+    return nil
+}
+```
+
+**Key Points:**
+- `blob.NewBlob()` creates the blob structure
+- `c.Blob.Submit()` submits to Celestia
+- Returns the block height where blob was included
+- Can submit multiple blobs in one transaction (pass array)
+
+### Blob Submission with Feegranter
+
+```go
+// Get feegranter from config
+feegranterStr := viper.GetString("celestia.feegranter")
+var submitOpts *blob.SubmitOptions
+if feegranterStr != "" {
+    submitOpts = state.NewTxConfig(state.WithFeeGranterAddress(feegranterStr))
+}
+
+// Submit with feegranter
+height, err := c.Blob.Submit(ctx, []*blob.Blob{b}, submitOpts)
+```
+
+**Key Points:**
+- Use `state.NewTxConfig()` to create submit options
+- `state.WithFeeGranterAddress()` sets the feegranter
+- Feegranter pays transaction fees on your behalf
+- Pass `nil` for `submitOpts` if no feegranter
+
+## 5. Blob Reading/Verification
+
+### Retrieving a Blob
+
+```go
+// Retrieve by height, namespace, and commitment
+retrieved, err := c.Blob.Get(ctx, height, namespace, b.Commitment)
+if err != nil {
+    return fmt.Errorf("failed to retrieve blob: %w", err)
+}
+
+// Access the data
+data := retrieved.Data()
+fmt.Printf("Retrieved: %s\n", string(data))
+```
+
+**Key Points:**
+- Need three pieces of info: height, namespace, commitment
+- Commitment is generated when creating the blob (`b.Commitment`)
+- `retrieved.Data()` returns the raw blob bytes
+- This proves the blob was actually stored
+
+## Dependencies You Need
+
+```go
+import (
+    "github.com/celestiaorg/celestia-node/api/client"
+    "github.com/celestiaorg/celestia-node/blob"
+    "github.com/celestiaorg/celestia-node/nodebuilder/p2p"
+    "github.com/celestiaorg/celestia-node/state"
+    libshare "github.com/celestiaorg/go-square/v3/share"  // v3 is important!
+    "github.com/cosmos/cosmos-sdk/codec"
+    codectypes "github.com/cosmos/cosmos-sdk/codec/types"
+    cryptocodec "github.com/cosmos/cosmos-sdk/crypto/codec"
+    "github.com/cosmos/cosmos-sdk/crypto/hd"
+    "github.com/cosmos/cosmos-sdk/crypto/keyring"
+)
+```
+
+## Common Patterns
+
+### Pattern 1: Submit and Verify Loop
+
+```go
+for i := 1; i <= 3; i++ {
+    // Create blob
+    data := fmt.Sprintf("Message #%d", i)
+    b, _ := blob.NewBlob(libshare.ShareVersionZero, namespace, []byte(data), nil)
+    
+    // Submit
+    height, _ := c.Blob.Submit(ctx, []*blob.Blob{b}, submitOpts)
+    
+    // Verify
+    retrieved, _ := c.Blob.Get(ctx, height, namespace, b.Commitment)
+    fmt.Printf("Verified: %s\n", string(retrieved.Data()))
+    
+    // Wait between submissions
+    time.Sleep(2 * time.Second)
+}
+```
+
+### Pattern 2: Error Handling
+
+```go
+if err != nil {
+    if strings.Contains(err.Error(), "insufficient fee") {
+        // User needs more funds or feegranter
+    } else if strings.Contains(err.Error(), "namespace") {
+        // Namespace issue
+    }
+    return fmt.Errorf("operation failed: %w", err)
+}
+```
+
+## Important Notes for AI Assistants
+
+1. **go-square version**: Always use `v3`, not `v2`. The imports are different.
+   - v2: `github.com/celestiaorg/go-square/share`
+   - v3: `github.com/celestiaorg/go-square/v3/share`
+
+2. **Network type**: Must cast string to `p2p.Network` type:
+   ```go
+   Network: p2p.Network("mocha-4")
+   ```
+
+3. **Keyring codec**: Required for in-memory keyring to work:
+   ```go
+   interfaceRegistry := codectypes.NewInterfaceRegistry()
+   cryptocodec.RegisterInterfaces(interfaceRegistry)
+   cdc := codec.NewProtoCodec(interfaceRegistry)
+   ```
+
+4. **HD path**: Standard Cosmos path is `m/44'/118'/0'/0/0`
+
+5. **Namespace limitations**: 
+   - v0 namespaces: 10 bytes max
+   - Longer inputs get automatically hashed to fit
+
+6. **Commitment**: Auto-generated when creating blob, needed for retrieval
+
+## Testing Tips
+
+1. Use Mocha testnet for development (`mocha-4`)
+2. Public endpoints available at:
+   - RPC: Various public Celestia nodes
+   - gRPC: Same nodes usually on port 9090
+3. Get testnet tokens from Celestia faucet
+4. Use feegranter for sponsored transactions (no token balance needed)
+
+## Common Issues
+
+1. **"subID must be <= 10"**: Namespace is too long, needs hashing
+2. **"insufficient fee"**: Need tokens or feegranter
+3. **"unable to unmarshal"**: Codec not set up correctly for keyring
+4. **"failed to decode private key"**: Private key not in hex format
+
+## Complete Workflow Summary
+
+```
+1. Load config (viper)
+2. Create in-memory keyring (from private key or mnemonic)
+3. Create client (RPC + gRPC + keyring)
+4. Create namespace (text or hex → bytes → namespace object)
+5. Create blob (data + namespace)
+6. Submit blob (with optional feegranter)
+7. Get blob (height + namespace + commitment)
+8. Verify data matches
+```
+
+This is the minimal viable pattern for working with Celestia's Go client.
