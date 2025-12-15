@@ -7,16 +7,11 @@ import (
 	"fmt"
 	"time"
 
+	popsigner "github.com/Bidon15/popsigner/sdk-go"
 	"github.com/celestiaorg/celestia-node/api/client"
 	"github.com/celestiaorg/celestia-node/blob"
 	"github.com/celestiaorg/celestia-node/nodebuilder/p2p"
-	"github.com/celestiaorg/celestia-node/state"
 	libshare "github.com/celestiaorg/go-square/v3/share"
-	"github.com/cosmos/cosmos-sdk/codec"
-	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
-	cryptocodec "github.com/cosmos/cosmos-sdk/crypto/codec"
-	"github.com/cosmos/cosmos-sdk/crypto/hd"
-	"github.com/cosmos/cosmos-sdk/crypto/keyring"
 	"github.com/spf13/viper"
 )
 
@@ -33,12 +28,12 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	// Get private key or mnemonic from config
-	privateKeyHex := viper.GetString("celestia.private_key")
-	mnemonic := viper.GetString("celestia.mnemonic")
+	// Get PopSigner config
+	apiKey := viper.GetString("celestia.popsigner_api_key")
+	keyName := viper.GetString("celestia.key_name")
 
-	if privateKeyHex == "" && mnemonic == "" {
-		panic("Either celestia.private_key or celestia.mnemonic is required in config.toml")
+	if apiKey == "" || keyName == "" {
+		panic("celestia.popsigner_api_key and celestia.key_name are required in config.toml")
 	}
 
 	// Get namespace from config
@@ -47,11 +42,10 @@ func main() {
 		panic("celestia.namespace is required in config.toml")
 	}
 
-	// Setup in-memory keyring
-	keyname := "blobcell"
-	kr, err := setupInMemoryKeyring(keyname, privateKeyHex, mnemonic)
+	// Setup PopSigner keyring using direct SDK method
+	kr, err := popsigner.NewCelestiaKeyring(apiKey, keyName)
 	if err != nil {
-		panic(err)
+		panic(fmt.Sprintf("Failed to create PopSigner keyring for key '%s'. Ensure 'celestia.popsigner_api_key' is correct and 'celestia.key_name' ('%s') exists and is accessible: %v", keyName, keyName, err))
 	}
 
 	// Configure client using config values
@@ -61,7 +55,7 @@ func main() {
 			EnableDATLS:  true,
 		},
 		SubmitConfig: client.SubmitConfig{
-			DefaultKeyName: keyname,
+			DefaultKeyName: keyName,
 			Network:        p2p.Network(viper.GetString("celestia.network")),
 			CoreGRPCConfig: client.CoreGRPCConfig{
 				Addr:       viper.GetString("celestia.grpc_url"),
@@ -88,11 +82,28 @@ func main() {
 		}
 	}
 
-	// Ensure it fits in 10 bytes (v0 namespace ID size)
-	if len(namespaceBytes) > 10 {
-		// Hash to get 10 bytes
+	// Celestia V0 namespaces must be 28 bytes and start with leading zeros (for user namespaces).
+	// We pad with leading zeros to ensure it meets the length requirement.
+	if len(namespaceBytes) < 28 {
+		padded := make([]byte, 28)
+		copy(padded[28-len(namespaceBytes):], namespaceBytes)
+		namespaceBytes = padded
+	} else if len(namespaceBytes) > 28 {
+		// Should not happen with typical usage of this example, but truncate or hash if too long?
+		// User specifically asked for stacking with leading zeros, so we assume input fits.
+		// Let's truncate from the left (lossy) or hash. Let's start with hashing if too long to maintain uniqueness?
+		// Actually, given the error, let's just warn or fail, but for now hash to safety if too long.
+		// For this specific error (len < 10 typically), padding is the fix.
+		// If > 28, simply hashing to 28 bytes might violate the leading zero rule again if hash doesn't have them.
+		// Safest strictly for the user's input (8 bytes) is padding.
+		// If input was indeed > 28 bytes, we can't easily make it a valid user namespace (requires 18 zeros).
+		// So we assume input is short ID.
 		hash := sha256.Sum256(namespaceBytes)
-		namespaceBytes = hash[:10]
+		// We can't just take the hash, we need leading zeros.
+		// We'll take the last 10 bytes of the hash and pad.
+		padded := make([]byte, 28)
+		copy(padded[28-10:], hash[:10])
+		namespaceBytes = padded
 	}
 
 	namespace, err := libshare.NewNamespace(libshare.ShareVersionZero, namespaceBytes)
@@ -100,53 +111,10 @@ func main() {
 		panic(fmt.Sprintf("Failed to create namespace: %v", err))
 	}
 
-	// Get feegranter from config
-	feegranterStr := viper.GetString("celestia.feegranter")
-	var submitOpts *blob.SubmitOptions
-	if feegranterStr != "" {
-		submitOpts = state.NewTxConfig(state.WithFeeGranterAddress(feegranterStr))
-		fmt.Printf("Using feegranter: %s\\n", feegranterStr)
-	}
-
 	// Submit blobs
-	if err := submitBlobs(ctx, c, namespace, submitOpts); err != nil {
+	if err := submitBlobs(ctx, c, namespace, nil); err != nil {
 		panic(err)
 	}
-}
-
-func setupInMemoryKeyring(keyname, privateKeyHex, mnemonic string) (keyring.Keyring, error) {
-	// Create minimal codec for keyring
-	interfaceRegistry := codectypes.NewInterfaceRegistry()
-	cryptocodec.RegisterInterfaces(interfaceRegistry)
-	cdc := codec.NewProtoCodec(interfaceRegistry)
-	kr := keyring.NewInMemory(cdc)
-
-	if privateKeyHex != "" {
-		// Decode hex private key
-		privateKeyBytes, err := hex.DecodeString(privateKeyHex)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode private key hex: %w", err)
-		}
-
-		// Import as armor format (which is what Keplr exports)
-		err = kr.ImportPrivKey(keyname, string(privateKeyBytes), "")
-		if err != nil {
-			return nil, fmt.Errorf("failed to import private key: %w", err)
-		}
-	} else {
-		// Use mnemonic
-		// Default HD path for Cosmos/Celestia: m/44'/118'/0'/0/0
-		hdPath := "m/44'/118'/0'/0/0"
-		// Use secp256k1
-		algo := hd.Secp256k1
-
-		_, err := kr.NewAccount(keyname, mnemonic, "", hdPath, algo)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create account from mnemonic: %w", err)
-		}
-	}
-
-	return kr, nil
 }
 
 func submitBlobs(ctx context.Context, c *client.Client, namespace libshare.Namespace, submitOpts *blob.SubmitOptions) error {

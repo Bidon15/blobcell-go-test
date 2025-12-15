@@ -1,0 +1,14 @@
+[celestia]
+# PopSigner Configuration
+popsigner_api_key = "psk_live_..."
+key_name = "my-celestia-key"
+
+# Node Configuration
+rpc_url = "http://localhost:26658"
+grpc_url = "localhost:9090"
+auth_token = "..." # Only needed if using a protected node
+network = "mocha-4"
+
+# Application Configuration
+namespace = "test/blobcell"
+# feegranter = "celestia1..." # Optional

@@ -3,9 +3,9 @@ module blobcell-example
 go 1.25.4
 
 require (
+	github.com/Bidon15/popsigner/sdk-go v0.0.0-20251215225937-c1e3a7996a69
 	github.com/celestiaorg/celestia-node v0.28.4-mocha
 	github.com/celestiaorg/go-square/v3 v3.0.2
-	github.com/cosmos/cosmos-sdk v0.50.13
 	github.com/spf13/viper v1.21.0
 )
 
@@ -97,6 +97,7 @@ require (
 	github.com/cosmos/btcutil v1.0.5 // indirect
 	github.com/cosmos/cosmos-db v1.1.1 // indirect
 	github.com/cosmos/cosmos-proto v1.0.0-beta.5 // indirect
+	github.com/cosmos/cosmos-sdk v0.50.13 // indirect
 	github.com/cosmos/go-bip39 v1.0.0 // indirect
 	github.com/cosmos/gogogateway v1.2.0 // indirect
 	github.com/cosmos/gogoproto v1.7.2 // indirect
